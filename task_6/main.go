@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -14,11 +15,45 @@ const (
 )
 
 func main() {
+	config := sarama.NewConfig()
+	config.Consumer.Return.Errors = true
+
 	createTopic()
 
 	produceMessages()
 
-	consumeMessages()
+	consumer, err := sarama.NewConsumer([]string{kafkaPort}, config)
+	if err != nil {
+		log.Fatalf("Ошибка создания consumer: %v", err)
+	}
+	defer func() {
+		if err := consumer.Close(); err != nil {
+			log.Fatalf("Ошибка закрытия consumer: %v", err)
+		}
+	}()
+
+	partitionConsumer, err := consumer.ConsumePartition(topic, 0, sarama.OffsetOldest)
+	if err != nil {
+		log.Fatalf("Ошибка создания partition consumer: %v", err)
+	}
+	defer func() {
+		if err := partitionConsumer.Close(); err != nil {
+			log.Fatalf("Ошибка закрытия partition consumer: %v", err)
+		}
+	}()
+
+	log.Printf("Консольный потребитель начал чтение из темы %s (partition 0)\n", topic)
+
+	for {
+		select {
+		case msg := <-partitionConsumer.Messages():
+			log.Printf("=> Сообщение: offset=%d, partition=%d, key=%s, value=%s",
+				msg.Offset, msg.Partition, string(msg.Key), string(msg.Value))
+
+		case err := <-partitionConsumer.Errors():
+			log.Printf("Ошибка при чтении сообщения: %v", err)
+		}
+	}
 }
 
 func createTopic() {
@@ -58,7 +93,8 @@ func produceMessages() {
 
 	go func() {
 		for msg := range producer.Successes() {
-			log.Printf("%s успешно отправлено в тему %s, offset %d\n", msg.Value, msg.Topic, msg.Offset)
+			key, _ := msg.Key.Encode()
+			log.Printf("%s с ключом %s успешно отправлено в тему %s, offset %d\n", msg.Value, string(key), msg.Topic, msg.Offset)
 		}
 	}()
 
@@ -69,47 +105,15 @@ func produceMessages() {
 	}()
 
 	for i := 0; i < 10; i++ {
-		msg := fmt.Sprintf("Сообщение #%d", i+1)
+		keyNum := rand.Intn(3)
+		key := fmt.Sprintf("key-%d", keyNum)
+		msg := fmt.Sprintf("Сообщение #%d c ключом %s", i+1, key)
 		producer.Input() <- &sarama.ProducerMessage{
 			Topic: topic,
+			Key:   sarama.StringEncoder(key),
 			Value: sarama.StringEncoder(msg),
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	time.Sleep(1 * time.Second)
-}
-
-func consumeMessages() {
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
-
-	consumer, err := sarama.NewConsumer([]string{kafkaPort}, config)
-	if err != nil {
-		log.Fatalf("Ошибка создания консюмера: %v", err)
-	}
-	defer consumer.Close()
-
-	partitionConsumer, err := consumer.ConsumePartition(topic, 0, sarama.OffsetOldest)
-	if err != nil {
-		log.Fatalf("Ошибка подписки на партицию: %v", err)
-	}
-	defer partitionConsumer.Close()
-
-	log.Println("Ожидание сообщений...")
-	count := 0
-	for {
-		select {
-		case msg := <-partitionConsumer.Messages():
-			fmt.Printf("Получено: %s\n", string(msg.Value))
-			count++
-			if count >= 10 {
-				return
-			}
-		case err := <-partitionConsumer.Errors():
-			log.Printf("Ошибка потребителя: %v", err)
-		case <-time.After(10 * time.Second):
-			log.Println("Таймаут ожидания сообщений")
-			return
-		}
-	}
 }

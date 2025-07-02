@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -9,9 +10,33 @@ import (
 )
 
 const (
-	kafkaPort = "localhost:9092"
-	topic     = "test-topic"
+	kafkaPort   = "localhost:9092"
+	topic       = "test-topic"
+	workerCount = 3
 )
+
+type ConsumerGroupHandler struct{}
+
+func (ConsumerGroupHandler) Setup(_ sarama.ConsumerGroupSession) error {
+	log.Println("=> Setup: инициализация")
+	return nil
+}
+
+func (ConsumerGroupHandler) Cleanup(_ sarama.ConsumerGroupSession) error {
+	log.Println("=> Cleanup: завершение")
+	return nil
+}
+
+func (ConsumerGroupHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	log.Println("=> ConsumeClaim: старт обработки")
+
+	for msg := range claim.Messages() {
+		log.Printf("=> Получено сообщение из группы: %s", string(msg.Value))
+		sess.MarkMessage(msg, "")
+	}
+
+	return nil
+}
 
 func main() {
 	createTopic()
@@ -82,34 +107,27 @@ func produceMessages() {
 func consumeMessages() {
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
+	config.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRoundRobin()
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 
-	consumer, err := sarama.NewConsumer([]string{kafkaPort}, config)
+	groupID := "test-group"
+
+	consumerGroup, err := sarama.NewConsumerGroup([]string{kafkaPort}, groupID, config)
 	if err != nil {
-		log.Fatalf("Ошибка создания консюмера: %v", err)
+		log.Fatalf("Ошибка создания consumer group: %v", err)
 	}
-	defer consumer.Close()
+	defer consumerGroup.Close()
 
-	partitionConsumer, err := consumer.ConsumePartition(topic, 0, sarama.OffsetOldest)
-	if err != nil {
-		log.Fatalf("Ошибка подписки на партицию: %v", err)
-	}
-	defer partitionConsumer.Close()
+	ctx := context.Background()
 
-	log.Println("Ожидание сообщений...")
-	count := 0
+	handler := ConsumerGroupHandler{}
+
+	log.Println("Потребитель вступает в группу...")
+
 	for {
-		select {
-		case msg := <-partitionConsumer.Messages():
-			fmt.Printf("Получено: %s\n", string(msg.Value))
-			count++
-			if count >= 10 {
-				return
-			}
-		case err := <-partitionConsumer.Errors():
-			log.Printf("Ошибка потребителя: %v", err)
-		case <-time.After(10 * time.Second):
-			log.Println("Таймаут ожидания сообщений")
-			return
+		err := consumerGroup.Consume(ctx, []string{topic}, handler)
+		if err != nil {
+			log.Fatalf("Ошибка при чтении: %v", err)
 		}
 	}
 }
